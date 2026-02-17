@@ -7,7 +7,10 @@ data class Message(
 
 data class ChatRequest(
     val model: String,
-    val messages: List<Message>
+    val messages: List<Message>,
+    val max_tokens: Int? = null,
+    val temperature: Double? = null,
+    val stop: List<String>? = null
 )
 
 data class Choice(
