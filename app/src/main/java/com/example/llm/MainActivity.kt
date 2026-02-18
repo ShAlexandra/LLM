@@ -1,4 +1,4 @@
-package com.example.llm   // ← проверь свой package
+package com.example.llm
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -31,113 +31,176 @@ class MainActivity : ComponentActivity() {
                     .padding(16.dp)
             ) {
 
-                Button(
-                    onClick = {
-                        scope.launch {
+                Button(onClick = {
+                    scope.launch {
 
-                            isLoading = true
-                            responseText = "Запрос отправлен..."
+                        isLoading = true
+                        responseText = "Выполняется..."
 
-                            try {
+                        try {
 
-                                val baseQuestion = "Объясни чёрные дыры"
+                            val baseInstruction = """
+                                Напиши корректную реализацию алгоритма быстрой сортировки (QuickSort) на Kotlin.
+                                Ответ пиши на русском языке.
+                                Обязательно выведи рабочий код.
+                                Код должен быть в блоке ```kotlin```.
+                                Не добавляй лишнего текста вне блока кода.
+                            """.trimIndent()
 
-                                // 🔹 1. Без ограничений
-                                val requestNoLimits = ChatRequest(
-                                    model = "meta-llama/llama-3.1-8b-instruct",
-                                    messages = listOf(
-                                        Message("user", baseQuestion)
+                            // =====================================================
+                            // 1️⃣ Прямой ответ
+                            // =====================================================
+
+                            val directAnswer =
+                                RetrofitClient.api.chatCompletion(
+                                    ChatRequest(
+                                        model = "meta-llama/llama-3.1-8b-instruct",
+                                        messages = listOf(
+                                            Message("user", baseInstruction)
+                                        )
                                     )
-                                )
-
-                                val noLimitsText =
-                                    RetrofitClient.api.chatCompletion(requestNoLimits)
-                                        .choices.firstOrNull()?.message?.content
-                                        ?: "Нет ответа"
+                                ).choices.firstOrNull()?.message?.content
+                                    ?: "Нет ответа"
 
 
-                                // 🔹 Общий контролируемый prompt
-                                val controlledPrompt = """
-                                    Объясни чёрные дыры.
-                                    
-                                    Ответ строго в JSON формате:
-                                    {
-                                      "definition": "...",
-                                      "formation": "...",
-                                      "fact": "..."
-                                    }
-                                    
-                                    Максимум 60 слов.
-                                    Никакого текста вне JSON.
-                                    Заверши вывод символом #.
-                                """.trimIndent()
+                            // =====================================================
+                            // 2️⃣ Пошагово
+                            // =====================================================
+
+                            val stepPrompt = """
+                                Напиши алгоритм QuickSort на Kotlin.
+                                Решай пошагово.
+                                Сначала кратко объясни шаги на русском,
+                                затем выведи финальный рабочий код.
+                                Код обязательно в блоке ```kotlin```.
+                                Без лишнего текста после кода.
+                            """.trimIndent()
+
+                            val stepAnswer =
+                                RetrofitClient.api.chatCompletion(
+                                    ChatRequest(
+                                        model = "meta-llama/llama-3.1-8b-instruct",
+                                        messages = listOf(
+                                            Message("user", stepPrompt)
+                                        )
+                                    )
+                                ).choices.firstOrNull()?.message?.content
+                                    ?: "Нет ответа"
 
 
-                                // 🔹 2. Ограничения + T=0.2
-                                val requestCold = ChatRequest(
-                                    model = "meta-llama/llama-3.1-8b-instruct",
-                                    messages = listOf(
-                                        Message("user", controlledPrompt)
-                                    ),
-                                    max_tokens = 150,
-                                    temperature = 0.2,
-                                    stop = listOf("#")
-                                )
+                            // =====================================================
+                            // 3️⃣ Сначала создать идеальный промпт
+                            // =====================================================
 
-                                val coldText =
-                                    RetrofitClient.api.chatCompletion(requestCold)
-                                        .choices.firstOrNull()?.message?.content
-                                        ?: "Нет ответа"
+                            val promptGenerator = """
+                                Составь идеальный промпт,
+                                который позволит получить максимально корректную,
+                                оптимизированную и компилируемую реализацию QuickSort на Kotlin.
+                                Ответ только текст промпта.
+                                На русском.
+                            """.trimIndent()
 
-
-                                // 🔹 3. Ограничения + T=1.0
-                                val requestHot = ChatRequest(
-                                    model = "meta-llama/llama-3.1-8b-instruct",
-                                    messages = listOf(
-                                        Message("user", controlledPrompt)
-                                    ),
-                                    max_tokens = 150,
-                                    temperature = 1.0,
-                                    stop = listOf("#")
-                                )
-
-                                val hotText =
-                                    RetrofitClient.api.chatCompletion(requestHot)
-                                        .choices.firstOrNull()?.message?.content
-                                        ?: "Нет ответа"
+                            val generatedPrompt =
+                                RetrofitClient.api.chatCompletion(
+                                    ChatRequest(
+                                        model = "meta-llama/llama-3.1-8b-instruct",
+                                        messages = listOf(
+                                            Message("user", promptGenerator)
+                                        )
+                                    )
+                                ).choices.firstOrNull()?.message?.content
+                                    ?: "Нет промпта"
 
 
-                                responseText = """
-                                    ==============================
-                                    🔹 1. БЕЗ ОГРАНИЧЕНИЙ
-                                    ==============================
-                                    
-                                    $noLimitsText
-                                    
-                                    
-                                    ==============================
-                                    🔹 2. С ОГРАНИЧЕНИЯМИ (T=0.2)
-                                    ==============================
-                                    
-                                    $coldText
-                                    
-                                    
-                                    ==============================
-                                    🔹 3. С ОГРАНИЧЕНИЯМИ (T=1.0)
-                                    ==============================
-                                    
-                                    $hotText
-                                """.trimIndent()
+                            val generatedAnswer =
+                                RetrofitClient.api.chatCompletion(
+                                    ChatRequest(
+                                        model = "meta-llama/llama-3.1-8b-instruct",
+                                        messages = listOf(
+                                            Message("user", generatedPrompt)
+                                        )
+                                    )
+                                ).choices.firstOrNull()?.message?.content
+                                    ?: "Нет ответа"
 
-                            } catch (e: Exception) {
-                                responseText = "Ошибка: ${e.message}"
-                            }
 
-                            isLoading = false
+                            // =====================================================
+                            // 4️⃣ Группа экспертов
+                            // =====================================================
+
+                            val expertsPrompt = """
+                                Задача: написать QuickSort на Kotlin.
+                                
+                                Работает группа экспертов:
+                                
+                                1. Аналитик — кратко объясняет алгоритм.
+                                2. Инженер — пишет рабочий код QuickSort.
+                                3. Критик — проверяет код и предлагает улучшения.
+                                
+                                Ответ на русском языке.
+                                Код обязателен и должен быть в блоке ```kotlin```.
+                                Без лишнего текста вне структуры ролей.
+                            """.trimIndent()
+
+                            val expertsAnswer =
+                                RetrofitClient.api.chatCompletion(
+                                    ChatRequest(
+                                        model = "meta-llama/llama-3.1-8b-instruct",
+                                        messages = listOf(
+                                            Message("user", expertsPrompt)
+                                        )
+                                    )
+                                ).choices.firstOrNull()?.message?.content
+                                    ?: "Нет ответа"
+
+
+                            // =====================================================
+                            // Итог
+                            // =====================================================
+
+                            responseText = """
+======================================
+1️⃣ ПРЯМОЙ ОТВЕТ
+======================================
+
+$directAnswer
+
+
+======================================
+2️⃣ ПОШАГОВО
+======================================
+
+$stepAnswer
+
+
+======================================
+3️⃣ ЧЕРЕЗ СГЕНЕРИРОВАННЫЙ ПРОМПТ
+======================================
+
+Сгенерированный промпт:
+--------------------------------------
+$generatedPrompt
+
+Результат:
+--------------------------------------
+$generatedAnswer
+
+
+======================================
+4️⃣ ГРУППА ЭКСПЕРТОВ
+======================================
+
+$expertsAnswer
+                            """.trimIndent()
+
+                        } catch (e: Exception) {
+                            responseText = "Ошибка: ${e.message}"
                         }
+
+                        isLoading = false
                     }
-                ) {
-                    Text("Сравнить все варианты")
+                }) {
+                    Text("Запустить 4 стратегии")
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
