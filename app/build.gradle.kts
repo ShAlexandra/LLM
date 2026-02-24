@@ -5,7 +5,7 @@ plugins {
 
 val apiKey: String = rootProject.file("local.properties")
     .readLines()
-    .find { it.startsWith("OPENROUTER_API_KEY=") }
+    .find { it.startsWith("DEEPSEEK_API_KEY=") }
     ?.substringAfter("=")
     ?: ""
 
@@ -28,7 +28,7 @@ android {
 
         buildConfigField(
             "String",
-            "OPENROUTER_API_KEY",
+            "DEEPSEEK_API_KEY",
             "\"$apiKey\""
         )
 
