@@ -14,10 +14,11 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
-    private val agent = LlmAgent()
+    private lateinit var agent: LlmAgent
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        agent = LlmAgent(historyStorage = ChatHistoryStorage(applicationContext))
 
         setContent {
             var inputText by remember { mutableStateOf("") }
