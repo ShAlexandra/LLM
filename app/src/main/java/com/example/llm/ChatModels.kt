@@ -17,6 +17,14 @@ data class Choice(
     val message: Message
 )
 
+/** Использование токенов в ответе API (если возвращается). */
+data class Usage(
+    val prompt_tokens: Int? = null,
+    val completion_tokens: Int? = null,
+    val total_tokens: Int? = null
+)
+
 data class ChatResponse(
-    val choices: List<Choice>
+    val choices: List<Choice>,
+    val usage: Usage? = null
 )

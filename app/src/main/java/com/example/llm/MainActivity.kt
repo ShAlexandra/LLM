@@ -15,14 +15,17 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
 
     private lateinit var agent: LlmAgent
+    private lateinit var historyStorage: ChatHistoryStorage
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        agent = LlmAgent(historyStorage = ChatHistoryStorage(applicationContext))
+        historyStorage = ChatHistoryStorage(applicationContext)
+        agent = LlmAgent(historyStorage = historyStorage)
 
         setContent {
             var inputText by remember { mutableStateOf("") }
             var responseText by remember { mutableStateOf("Введите запрос и нажмите «Отправить»") }
+            var tokenInfoText by remember { mutableStateOf("") }
             var isLoading by remember { mutableStateOf(false) }
 
             val scope = rememberCoroutineScope()
@@ -45,17 +48,36 @@ class MainActivity : ComponentActivity() {
                     maxLines = 4
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Токены истории: ~${agent.getHistoryTokensEstimate()} (лимит 128 000)",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Button(
                     onClick = {
                         scope.launch {
                             isLoading = true
                             responseText = "Отправка..."
+                            tokenInfoText = ""
                             val result = agent.send(inputText)
-                            responseText = when (result) {
-                                is LlmAgent.AgentResult.Success -> result.content
-                                is LlmAgent.AgentResult.Error -> "Ошибка: ${result.message}"
+                            when (result) {
+                                is LlmAgent.AgentResult.Success -> {
+                                    responseText = result.content
+                                    result.tokenInfo?.let { t ->
+                                        tokenInfoText = buildString {
+                                            append("Токены: запрос ${t.requestTokens}, ")
+                                            append("история ${t.historyTokens}, ")
+                                            append("ответ ${t.responseTokens}. ")
+                                            append("Всего промпт: ${t.totalPromptTokens}, всего: ${t.totalTokens}. ")
+                                            append("Лимит: ${t.contextLimit}")
+                                        }
+                                    }
+                                }
+                                is LlmAgent.AgentResult.Error -> {
+                                    responseText = "Ошибка: ${result.message}"
+                                }
                             }
                             isLoading = false
                         }
@@ -65,11 +87,27 @@ class MainActivity : ComponentActivity() {
                     Text(if (isLoading) "Отправка..." else "Отправить")
                 }
 
+                TextButton(onClick = {
+                    historyStorage.clearHistory()
+                    responseText = "История очищена. Токены истории: 0."
+                    tokenInfoText = ""
+                }) {
+                    Text("Очистить историю")
+                }
+
                 Spacer(modifier = Modifier.height(16.dp))
 
                 if (isLoading) {
                     CircularProgressIndicator(modifier = Modifier.size(32.dp))
                     Spacer(modifier = Modifier.height(16.dp))
+                }
+
+                if (tokenInfoText.isNotEmpty()) {
+                    Text(
+                        text = tokenInfoText,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
                 }
 
                 Column(
