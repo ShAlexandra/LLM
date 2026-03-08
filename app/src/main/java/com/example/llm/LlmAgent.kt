@@ -22,9 +22,7 @@ data class TokenInfo(
 
 /**
  * Агент для запросов к LLM через API.
- * Инкапсулирует формирование запроса, вызов API и разбор ответа.
- * При передаче [ChatHistoryStorage] сохраняет историю и восстанавливает её при перезапуске.
- * Поддерживает сжатие контекста: последние N сообщений хранятся целиком, остальное — в виде summary.
+ * Поддерживает 3 стратегии управления контекстом: Sliding Window, Sticky Facts, Branching.
  * Подсчитывает токены и предупреждает при переполнении контекста.
  */
 class LlmAgent(
@@ -32,81 +30,29 @@ class LlmAgent(
     private val api: DeepSeekApi = RetrofitClient.api,
     private val historyStorage: ChatHistoryStorage? = null,
     private val contextLimit: Int = DEFAULT_CONTEXT_LIMIT,
-    compressionEnabledDefault: Boolean = true,
-    private val maxRecentMessages: Int = MAX_RECENT_DEFAULT,
-    private val compressEvery: Int = COMPRESS_EVERY_DEFAULT
+    strategyDefault: ContextStrategy = ContextStrategy.SLIDING_WINDOW,
+    private val slidingWindowSize: Int = SLIDING_WINDOW_DEFAULT,
+    private val factsWindowSize: Int = FACTS_WINDOW_DEFAULT
 ) {
 
-    var compressionEnabled: Boolean = compressionEnabledDefault
+    var contextStrategy: ContextStrategy = strategyDefault
 
     /**
-     * Отправляет запрос пользователя в LLM и возвращает ответ или ошибку.
-     * Использует сохранённую историю (summary + последние сообщения). При включённом сжатии
-     * раз в [compressEvery] сообщений старые реплики сворачиваются в summary. Возвращает [TokenInfo] при успехе.
+     * Отправляет запрос пользователя в LLM. Контекст формируется по выбранной стратегии.
      */
     suspend fun send(userMessage: String): AgentResult = withContext(Dispatchers.IO) {
         if (userMessage.isBlank()) {
             return@withContext AgentResult.Error("Введите сообщение")
         }
         try {
-            val snapshot = historyStorage?.loadSnapshot() ?: HistorySnapshot("", emptyList())
-            val historyMessages = if (compressionEnabled) snapshot.toListForEstimate() else snapshot.messages
-            val newUserMessage = Message("user", userMessage.trim())
-            val messagesForRequest = historyMessages + newUserMessage
-
-            val historyTokensEst = estimateTokens(historyMessages)
-            val requestTokensEst = estimateTokens(listOf(newUserMessage))
-            val totalPromptEst = historyTokensEst + requestTokensEst
-            val overLimit = totalPromptEst > contextLimit
-
-            if (overLimit) {
-                return@withContext AgentResult.Error(
-                    "Превышен лимит контекста: $totalPromptEst токенов (лимит $contextLimit). " +
-                        "История: $historyTokensEst, запрос: $requestTokensEst. " +
-                        "Очистите историю или сократите сообщение."
-                )
+            when (contextStrategy) {
+                ContextStrategy.SLIDING_WINDOW -> sendSlidingWindow(userMessage)
+                ContextStrategy.STICKY_FACTS -> sendStickyFacts(userMessage)
+                ContextStrategy.BRANCHING -> sendBranching(userMessage)
             }
-
-            val request = ChatRequest(
-                model = modelId,
-                messages = messagesForRequest,
-                max_tokens = 2048
-            )
-            val response = api.chatCompletion(request)
-            val content = response.choices.firstOrNull()?.message?.content?.trim()
-                ?: return@withContext AgentResult.Error("Пустой ответ от модели")
-
-            val fullList = snapshot.messages + newUserMessage + Message("assistant", content)
-            if (compressionEnabled && fullList.size > maxRecentMessages) {
-                val toCompress = fullList.take(compressEvery)
-                val remaining = fullList.drop(compressEvery)
-                val newSummaryPart = summarizeMessages(toCompress)
-                val newSummary = if (snapshot.summary.isBlank()) newSummaryPart
-                    else snapshot.summary + "\n\n---\n\n" + newSummaryPart
-                historyStorage?.saveSnapshot(newSummary, remaining)
-            } else {
-                historyStorage?.saveSnapshot(if (compressionEnabled) snapshot.summary else "", fullList)
-            }
-
-            val usage = response.usage
-            val promptTokens = usage?.prompt_tokens ?: totalPromptEst
-            val completionTokens = usage?.completion_tokens ?: estimateTokens(content)
-            val totalTokens = usage?.total_tokens ?: (promptTokens + completionTokens)
-
-            val tokenInfo = TokenInfo(
-                requestTokens = usage?.prompt_tokens?.let { it - historyTokensEst } ?: requestTokensEst,
-                historyTokens = historyTokensEst,
-                responseTokens = completionTokens,
-                totalPromptTokens = promptTokens,
-                totalTokens = totalTokens,
-                isOverLimit = false,
-                contextLimit = contextLimit
-            )
-            AgentResult.Success(content, tokenInfo)
         } catch (e: Exception) {
             val msg = e.message ?: "Ошибка сети"
-            val isTimeout = e is java.net.SocketTimeoutException ||
-                msg.contains("timeout", ignoreCase = true)
+            val isTimeout = e is java.net.SocketTimeoutException || msg.contains("timeout", ignoreCase = true)
             AgentResult.Error(
                 if (isTimeout) "Превышено время ожидания ответа. Попробуйте короче запрос или подождите."
                 else msg
@@ -114,37 +60,139 @@ class LlmAgent(
         }
     }
 
-    /** Вызывает модель для краткого содержания списка сообщений (на русском). */
-    private suspend fun summarizeMessages(messages: List<Message>): String {
-        if (messages.isEmpty()) return ""
-        val text = messages.joinToString("\n") { "${it.role}: ${it.content}" }
+    private suspend fun sendSlidingWindow(userMessage: String): AgentResult {
+        val history = historyStorage?.loadSliding()?.takeLast(slidingWindowSize) ?: emptyList()
+        val newUser = Message("user", userMessage.trim())
+        val messagesForRequest = history + newUser
+        val historyTokensEst = estimateTokens(history)
+        val requestTokensEst = estimateTokens(listOf(newUser))
+        if (historyTokensEst + requestTokensEst > contextLimit) {
+            return AgentResult.Error("Превышен лимит контекста. Очистите историю.")
+        }
+        val response = api.chatCompletion(ChatRequest(model = modelId, messages = messagesForRequest, max_tokens = 2048))
+        val content = response.choices.firstOrNull()?.message?.content?.trim()
+            ?: return AgentResult.Error("Пустой ответ от модели")
+        val fullList = history + newUser + Message("assistant", content)
+        historyStorage?.saveSliding(fullList.takeLast(slidingWindowSize))
+        return buildSuccess(content, response, historyTokensEst, requestTokensEst)
+    }
+
+    private suspend fun sendStickyFacts(userMessage: String): AgentResult {
+        val state = historyStorage?.loadFacts() ?: FactsState("", emptyList())
+        val recent = state.messages.takeLast(factsWindowSize)
+        val newUser = Message("user", userMessage.trim())
+        val messagesForRequest = buildList {
+            if (state.facts.isNotBlank()) {
+                add(Message("system", "Важные факты из диалога (цели, ограничения, предпочтения, решения):\n${state.facts}"))
+            }
+            addAll(recent)
+            add(newUser)
+        }
+        val historyTokensEst = estimateTokens(if (state.facts.isNotBlank()) listOf(Message("system", state.facts)) + recent else recent)
+        val requestTokensEst = estimateTokens(listOf(newUser))
+        if (historyTokensEst + requestTokensEst > contextLimit) {
+            return AgentResult.Error("Превышен лимит контекста. Очистите историю.")
+        }
+        val response = api.chatCompletion(ChatRequest(model = modelId, messages = messagesForRequest, max_tokens = 2048))
+        val content = response.choices.firstOrNull()?.message?.content?.trim()
+            ?: return AgentResult.Error("Пустой ответ от модели")
+        val newFacts = extractFacts(state.facts, newUser.content, content)
+        val fullList = state.messages + newUser + Message("assistant", content)
+        historyStorage?.saveFacts(FactsState(newFacts, fullList.takeLast(factsWindowSize)))
+        return buildSuccess(content, response, historyTokensEst, requestTokensEst)
+    }
+
+    private suspend fun extractFacts(existingFacts: String, userText: String, assistantText: String): String {
+        val prompt = buildString {
+            if (existingFacts.isNotBlank()) append("Текущие факты:\n$existingFacts\n\n")
+            append("Новый обмен:\nuser: $userText\nassistant: $assistantText\n\n")
+            append("Извлеки и обнови ключевые факты (цель, ограничения, предпочтения, решения). Формат: ключ: значение, по одному на строку. Только факты, без лишнего текста.")
+        }
         val req = ChatRequest(
             model = modelId,
-            messages = listOf(
-                Message("system", "Кратко перескажи диалог на русском в 2–4 предложениях, сохрани ключевые факты и решения."),
-                Message("user", text)
-            ),
+            messages = listOf(Message("user", prompt)),
             max_tokens = 512
         )
         val res = api.chatCompletion(req)
-        return res.choices.firstOrNull()?.message?.content?.trim() ?: ""
+        val extracted = res.choices.firstOrNull()?.message?.content?.trim() ?: return existingFacts
+        return if (existingFacts.isBlank()) extracted else "$existingFacts\n$extracted"
     }
 
-    /** Оценка числа токенов по тексту (приближённо: ~4 символа на токен). */
-    fun estimateTokens(messages: List<Message>): Int =
-        messages.sumOf { estimateTokens(it.content) }
-
-    fun estimateTokens(text: String): Int {
-        if (text.isBlank()) return 0
-        return (text.length + 3) / 4
+    private suspend fun sendBranching(userMessage: String): AgentResult {
+        var state = historyStorage?.loadBranching() ?: BranchingState("main", mapOf("main" to emptyList()))
+        val currentMessages = state.currentMessages()
+        val newUser = Message("user", userMessage.trim())
+        val messagesForRequest = currentMessages + newUser
+        val historyTokensEst = estimateTokens(currentMessages)
+        val requestTokensEst = estimateTokens(listOf(newUser))
+        if (historyTokensEst + requestTokensEst > contextLimit) {
+            return AgentResult.Error("Превышен лимит контекста. Очистите историю или смените ветку.")
+        }
+        val response = api.chatCompletion(ChatRequest(model = modelId, messages = messagesForRequest, max_tokens = 2048))
+        val content = response.choices.firstOrNull()?.message?.content?.trim()
+            ?: return AgentResult.Error("Пустой ответ от модели")
+        val updated = state.currentMessages() + newUser + Message("assistant", content)
+        val newBranches = state.branches + (state.currentBranchName to updated)
+        state = BranchingState(state.currentBranchName, newBranches)
+        historyStorage?.saveBranching(state)
+        return buildSuccess(content, response, historyTokensEst, requestTokensEst)
     }
 
-    /** Текущая оценка токенов истории (summary + последние сообщения, если сжатие вкл). */
+    private fun buildSuccess(
+        content: String,
+        response: ChatResponse,
+        historyTokensEst: Int,
+        requestTokensEst: Int
+    ): AgentResult {
+        val usage = response.usage
+        val promptTokens = usage?.prompt_tokens ?: (historyTokensEst + requestTokensEst)
+        val completionTokens = usage?.completion_tokens ?: estimateTokens(content)
+        val totalTokens = usage?.total_tokens ?: (promptTokens + completionTokens)
+        val tokenInfo = TokenInfo(
+            requestTokens = requestTokensEst,
+            historyTokens = historyTokensEst,
+            responseTokens = completionTokens,
+            totalPromptTokens = promptTokens,
+            totalTokens = totalTokens,
+            isOverLimit = false,
+            contextLimit = contextLimit
+        )
+        return AgentResult.Success(content, tokenInfo)
+    }
+
+    fun estimateTokens(messages: List<Message>): Int = messages.sumOf { estimateTokens(it.content) }
+    fun estimateTokens(text: String): Int = if (text.isBlank()) 0 else (text.length + 3) / 4
+
     fun getHistoryTokensEstimate(): Int {
-        val snapshot = historyStorage?.loadSnapshot() ?: return 0
-        val list = if (compressionEnabled) snapshot.toListForEstimate() else snapshot.messages
-        return estimateTokens(list)
+        val storage = historyStorage ?: return 0
+        return when (contextStrategy) {
+            ContextStrategy.SLIDING_WINDOW -> estimateTokens(storage.loadSliding())
+            ContextStrategy.STICKY_FACTS -> {
+                val s = storage.loadFacts()
+                estimateTokens(if (s.facts.isNotBlank()) listOf(Message("system", s.facts)) + s.messages else s.messages)
+            }
+            ContextStrategy.BRANCHING -> estimateTokens(storage.loadBranching().currentMessages())
+        }
     }
+
+    // --- Branching: создание ветки и переключение ---
+    fun createBranch(newBranchName: String): Boolean {
+        val state = historyStorage?.loadBranching() ?: return false
+        if (state.branches.containsKey(newBranchName)) return false
+        val copy = state.currentMessages()
+        historyStorage.saveBranching(BranchingState(newBranchName, state.branches + (newBranchName to copy)))
+        return true
+    }
+
+    fun switchBranch(branchName: String): Boolean {
+        val state = historyStorage?.loadBranching() ?: return false
+        if (!state.branches.containsKey(branchName)) return false
+        historyStorage.saveBranching(state.copy(currentBranchName = branchName))
+        return true
+    }
+
+    fun getBranchNames(): List<String> = historyStorage?.loadBranching()?.branches?.keys?.toList() ?: listOf("main")
+    fun getCurrentBranchName(): String = historyStorage?.loadBranching()?.currentBranchName ?: "main"
 
     sealed class AgentResult {
         data class Success(val content: String, val tokenInfo: TokenInfo? = null) : AgentResult()
@@ -154,7 +202,7 @@ class LlmAgent(
     companion object {
         private const val DEFAULT_MODEL = "deepseek-chat"
         private const val DEFAULT_CONTEXT_LIMIT = 128_000
-        private const val MAX_RECENT_DEFAULT = 20
-        private const val COMPRESS_EVERY_DEFAULT = 10
+        private const val SLIDING_WINDOW_DEFAULT = 20
+        private const val FACTS_WINDOW_DEFAULT = 20
     }
 }
