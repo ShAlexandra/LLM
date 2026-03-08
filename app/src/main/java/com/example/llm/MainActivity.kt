@@ -27,6 +27,7 @@ class MainActivity : ComponentActivity() {
             var responseText by remember { mutableStateOf("Введите запрос и нажмите «Отправить»") }
             var tokenInfoText by remember { mutableStateOf("") }
             var isLoading by remember { mutableStateOf(false) }
+            var compressionOn by remember { mutableStateOf(true) }
 
             val scope = rememberCoroutineScope()
             val scrollState = rememberScrollState()
@@ -49,6 +50,23 @@ class MainActivity : ComponentActivity() {
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Switch(
+                        checked = compressionOn,
+                        onCheckedChange = {
+                            compressionOn = it
+                            agent.compressionEnabled = it
+                        }
+                    )
+                    Text(
+                        text = "Сжатие истории (последние 20 сообщений целиком, остальное — summary)",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
                 Text(
                     text = "Токены истории: ~${agent.getHistoryTokensEstimate()} (лимит 128 000)",
                     style = MaterialTheme.typography.bodySmall
