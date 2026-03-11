@@ -22,8 +22,8 @@ data class TokenInfo(
 
 /**
  * Агент для запросов к LLM через API.
- * Поддерживает 3 стратегии управления контекстом: Sliding Window, Sticky Facts, Branching.
- * Подсчитывает токены и предупреждает при переполнении контекста.
+ * Поддерживает стратегии контекста: Sliding Window, Sticky Facts, Branching, Memory Layers.
+ * Memory Layers: краткосрочная (диалог) + рабочая (задача) + долговременная (профиль, знания).
  */
 class LlmAgent(
     private val modelId: String = DEFAULT_MODEL,
@@ -32,7 +32,8 @@ class LlmAgent(
     private val contextLimit: Int = DEFAULT_CONTEXT_LIMIT,
     strategyDefault: ContextStrategy = ContextStrategy.SLIDING_WINDOW,
     private val slidingWindowSize: Int = SLIDING_WINDOW_DEFAULT,
-    private val factsWindowSize: Int = FACTS_WINDOW_DEFAULT
+    private val factsWindowSize: Int = FACTS_WINDOW_DEFAULT,
+    private val memoryShortTermSize: Int = MEMORY_SHORT_TERM_DEFAULT
 ) {
 
     var contextStrategy: ContextStrategy = strategyDefault
@@ -49,6 +50,7 @@ class LlmAgent(
                 ContextStrategy.SLIDING_WINDOW -> sendSlidingWindow(userMessage)
                 ContextStrategy.STICKY_FACTS -> sendStickyFacts(userMessage)
                 ContextStrategy.BRANCHING -> sendBranching(userMessage)
+                ContextStrategy.MEMORY_LAYERS -> sendMemoryLayers(userMessage)
             }
         } catch (e: Exception) {
             val msg = e.message ?: "Ошибка сети"
@@ -138,6 +140,24 @@ class LlmAgent(
         return buildSuccess(content, response, historyTokensEst, requestTokensEst)
     }
 
+    private suspend fun sendMemoryLayers(userMessage: String): AgentResult {
+        val snapshot = historyStorage?.loadMemorySnapshot(memoryShortTermSize) ?: MemorySnapshot(emptyList(), emptyList(), emptyList())
+        val newUser = Message("user", userMessage.trim())
+        val contextMessages = snapshot.toContextMessages()
+        val messagesForRequest = contextMessages + newUser
+        val historyTokensEst = estimateTokens(contextMessages)
+        val requestTokensEst = estimateTokens(listOf(newUser))
+        if (historyTokensEst + requestTokensEst > contextLimit) {
+            return AgentResult.Error("Превышен лимит контекста. Очистите историю или рабочую память.")
+        }
+        val response = api.chatCompletion(ChatRequest(model = modelId, messages = messagesForRequest, max_tokens = 2048))
+        val content = response.choices.firstOrNull()?.message?.content?.trim()
+            ?: return AgentResult.Error("Пустой ответ от модели")
+        val newShortTerm = (snapshot.shortTerm + newUser + Message("assistant", content)).takeLast(memoryShortTermSize)
+        historyStorage?.saveShortTermMemory(newShortTerm)
+        return buildSuccess(content, response, historyTokensEst, requestTokensEst)
+    }
+
     private fun buildSuccess(
         content: String,
         response: ChatResponse,
@@ -172,8 +192,26 @@ class LlmAgent(
                 estimateTokens(if (s.facts.isNotBlank()) listOf(Message("system", s.facts)) + s.messages else s.messages)
             }
             ContextStrategy.BRANCHING -> estimateTokens(storage.loadBranching().currentMessages())
+            ContextStrategy.MEMORY_LAYERS -> estimateTokens(storage.loadMemorySnapshot(memoryShortTermSize).toContextMessages())
         }
     }
+
+    // --- Memory Layers: явное сохранение в рабочую и долговременную память ---
+    fun addToWorkingMemory(key: String, value: String) {
+        if (historyStorage == null) return
+        val list = (historyStorage.loadWorkingMemory()) + MemoryEntry(key.trim(), value.trim())
+        historyStorage.saveWorkingMemory(list)
+    }
+
+    fun addToLongTermMemory(key: String, value: String) {
+        if (historyStorage == null) return
+        val list = (historyStorage.loadLongTermMemory()) + MemoryEntry(key.trim(), value.trim())
+        historyStorage.saveLongTermMemory(list)
+    }
+
+    fun getWorkingMemory(): List<MemoryEntry> = historyStorage?.loadWorkingMemory() ?: emptyList()
+    fun getLongTermMemory(): List<MemoryEntry> = historyStorage?.loadLongTermMemory() ?: emptyList()
+    fun clearWorkingMemory() { historyStorage?.saveWorkingMemory(emptyList()) }
 
     // --- Branching: создание ветки и переключение ---
     fun createBranch(newBranchName: String): Boolean {
@@ -204,5 +242,6 @@ class LlmAgent(
         private const val DEFAULT_CONTEXT_LIMIT = 128_000
         private const val SLIDING_WINDOW_DEFAULT = 20
         private const val FACTS_WINDOW_DEFAULT = 20
+        private const val MEMORY_SHORT_TERM_DEFAULT = 20
     }
 }
