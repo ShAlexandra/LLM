@@ -36,6 +36,28 @@ class MainActivity : ComponentActivity() {
             var workingCount by remember { mutableStateOf(0) }
             var longTermCount by remember { mutableStateOf(0) }
             var memorySaveToWorking by remember { mutableStateOf(true) }
+            var profileKeys by remember { mutableStateOf<List<String>>(emptyList()) }
+            var activeProfileKey by remember { mutableStateOf<String?>(null) }
+            var newProfileName by remember { mutableStateOf("") }
+            var profileName by remember { mutableStateOf("") }
+            var profileStyle by remember { mutableStateOf("") }
+            var profileFormat by remember { mutableStateOf("") }
+            var profileConstraints by remember { mutableStateOf("") }
+
+            fun loadFormFromProfile(key: String?) {
+                val p = key?.let { historyStorage.getProfile(it) } ?: UserProfile()
+                profileName = p.name ?: ""
+                profileStyle = p.style ?: ""
+                profileFormat = p.format ?: ""
+                profileConstraints = p.constraints ?: ""
+            }
+
+            LaunchedEffect(Unit) {
+                val state = historyStorage.loadProfileState()
+                profileKeys = state.profiles.keys.toList().sorted()
+                activeProfileKey = state.activeKey
+                loadFormFromProfile(state.activeKey)
+            }
 
             val scope = rememberCoroutineScope()
             val scrollState = rememberScrollState()
@@ -50,6 +72,11 @@ class MainActivity : ComponentActivity() {
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(scrollState)
+                ) {
                 Text("Стратегия контекста", style = MaterialTheme.typography.labelMedium)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -75,6 +102,119 @@ class MainActivity : ComponentActivity() {
                             label = { Text(label) },
                             modifier = Modifier.padding(end = 4.dp)
                         )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Профиль пользователя", style = MaterialTheme.typography.labelMedium)
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    profileKeys.forEach { key ->
+                        FilterChip(
+                            selected = activeProfileKey == key,
+                            onClick = {
+                                historyStorage.setActiveProfileKey(key)
+                                activeProfileKey = key
+                                loadFormFromProfile(key)
+                            },
+                            label = { Text(key) },
+                            modifier = Modifier.padding(end = 4.dp)
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = newProfileName,
+                        onValueChange = { newProfileName = it },
+                        modifier = Modifier.weight(1f).padding(end = 8.dp),
+                        placeholder = { Text("Название нового профиля") },
+                        singleLine = true
+                    )
+                    Button(
+                        onClick = {
+                            val name = newProfileName.trim()
+                            if (name.isNotEmpty() && name !in profileKeys) {
+                                historyStorage.addProfile(name)
+                                profileKeys = historyStorage.getProfileKeys()
+                                activeProfileKey = name
+                                newProfileName = ""
+                                loadFormFromProfile(name)
+                                uiRefreshTrigger++
+                            }
+                        }
+                    ) { Text("Добавить") }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = profileName,
+                    onValueChange = { profileName = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Имя") },
+                    placeholder = { Text("Как к вам обращаться") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = profileStyle,
+                    onValueChange = { profileStyle = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Стиль") },
+                    placeholder = { Text("Напр.: кратко, дружелюбно, формально") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = profileFormat,
+                    onValueChange = { profileFormat = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Формат") },
+                    placeholder = { Text("Напр.: списки, абзацы, маркированный список") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = profileConstraints,
+                    onValueChange = { profileConstraints = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Ограничения") },
+                    placeholder = { Text("Напр.: без эмодзи, макс. 3 предложения") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        onClick = {
+                            val key = activeProfileKey
+                            if (key != null) {
+                                historyStorage.saveProfile(
+                                    key,
+                                    UserProfile(
+                                        name = profileName.trim().ifBlank { null },
+                                        style = profileStyle.trim().ifBlank { null },
+                                        format = profileFormat.trim().ifBlank { null },
+                                        constraints = profileConstraints.trim().ifBlank { null }
+                                    )
+                                )
+                                uiRefreshTrigger++
+                            }
+                        },
+                        enabled = activeProfileKey != null
+                    ) { Text("Сохранить профиль") }
+                    if (activeProfileKey != null && profileKeys.size > 1) {
+                        TextButton(
+                            onClick = {
+                                val key = activeProfileKey!!
+                                historyStorage.deleteProfile(key)
+                                val state = historyStorage.loadProfileState()
+                                profileKeys = state.profiles.keys.toList().sorted()
+                                activeProfileKey = state.activeKey
+                                loadFormFromProfile(state.activeKey)
+                                uiRefreshTrigger++
+                            }
+                        ) { Text("Удалить") }
                     }
                 }
 
@@ -234,15 +374,10 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(scrollState)
-                ) {
-                    Text(
-                        text = responseText,
-                        style = MaterialTheme.typography.bodyLarge
-                    )
+                Text(
+                    text = responseText,
+                    style = MaterialTheme.typography.bodyLarge
+                )
                 }
             }
         }

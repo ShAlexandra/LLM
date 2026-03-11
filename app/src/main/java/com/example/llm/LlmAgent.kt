@@ -62,11 +62,20 @@ class LlmAgent(
         }
     }
 
+    private fun getProfileMessage(): Message? =
+        historyStorage?.getActiveProfile()?.takeIf { !it.isEmpty() }?.let {
+            Message("system", it.toSystemMessage())
+        }
+
     private suspend fun sendSlidingWindow(userMessage: String): AgentResult {
         val history = historyStorage?.loadSliding()?.takeLast(slidingWindowSize) ?: emptyList()
         val newUser = Message("user", userMessage.trim())
-        val messagesForRequest = history + newUser
-        val historyTokensEst = estimateTokens(history)
+        val messagesForRequest = buildList {
+            getProfileMessage()?.let { add(it) }
+            addAll(history)
+            add(newUser)
+        }
+        val historyTokensEst = estimateTokens(messagesForRequest) - estimateTokens(listOf(newUser))
         val requestTokensEst = estimateTokens(listOf(newUser))
         if (historyTokensEst + requestTokensEst > contextLimit) {
             return AgentResult.Error("Превышен лимит контекста. Очистите историю.")
@@ -84,14 +93,15 @@ class LlmAgent(
         val recent = state.messages.takeLast(factsWindowSize)
         val newUser = Message("user", userMessage.trim())
         val messagesForRequest = buildList {
+            getProfileMessage()?.let { add(it) }
             if (state.facts.isNotBlank()) {
                 add(Message("system", "Важные факты из диалога (цели, ограничения, предпочтения, решения):\n${state.facts}"))
             }
             addAll(recent)
             add(newUser)
         }
-        val historyTokensEst = estimateTokens(if (state.facts.isNotBlank()) listOf(Message("system", state.facts)) + recent else recent)
         val requestTokensEst = estimateTokens(listOf(newUser))
+        val historyTokensEst = estimateTokens(messagesForRequest) - requestTokensEst
         if (historyTokensEst + requestTokensEst > contextLimit) {
             return AgentResult.Error("Превышен лимит контекста. Очистите историю.")
         }
@@ -124,9 +134,13 @@ class LlmAgent(
         var state = historyStorage?.loadBranching() ?: BranchingState("main", mapOf("main" to emptyList()))
         val currentMessages = state.currentMessages()
         val newUser = Message("user", userMessage.trim())
-        val messagesForRequest = currentMessages + newUser
-        val historyTokensEst = estimateTokens(currentMessages)
+        val messagesForRequest = buildList {
+            getProfileMessage()?.let { add(it) }
+            addAll(currentMessages)
+            add(newUser)
+        }
         val requestTokensEst = estimateTokens(listOf(newUser))
+        val historyTokensEst = estimateTokens(messagesForRequest) - requestTokensEst
         if (historyTokensEst + requestTokensEst > contextLimit) {
             return AgentResult.Error("Превышен лимит контекста. Очистите историю или смените ветку.")
         }
@@ -144,9 +158,13 @@ class LlmAgent(
         val snapshot = historyStorage?.loadMemorySnapshot(memoryShortTermSize) ?: MemorySnapshot(emptyList(), emptyList(), emptyList())
         val newUser = Message("user", userMessage.trim())
         val contextMessages = snapshot.toContextMessages()
-        val messagesForRequest = contextMessages + newUser
-        val historyTokensEst = estimateTokens(contextMessages)
+        val messagesForRequest = buildList {
+            getProfileMessage()?.let { add(it) }
+            addAll(contextMessages)
+            add(newUser)
+        }
         val requestTokensEst = estimateTokens(listOf(newUser))
+        val historyTokensEst = estimateTokens(messagesForRequest) - requestTokensEst
         if (historyTokensEst + requestTokensEst > contextLimit) {
             return AgentResult.Error("Превышен лимит контекста. Очистите историю или рабочую память.")
         }
@@ -185,7 +203,9 @@ class LlmAgent(
 
     fun getHistoryTokensEstimate(): Int {
         val storage = historyStorage ?: return 0
-        return when (contextStrategy) {
+        val profileMsg = getProfileMessage()
+        val profileTokens = if (profileMsg != null) estimateTokens(profileMsg.content) else 0
+        val base = when (contextStrategy) {
             ContextStrategy.SLIDING_WINDOW -> estimateTokens(storage.loadSliding())
             ContextStrategy.STICKY_FACTS -> {
                 val s = storage.loadFacts()
@@ -194,6 +214,7 @@ class LlmAgent(
             ContextStrategy.BRANCHING -> estimateTokens(storage.loadBranching().currentMessages())
             ContextStrategy.MEMORY_LAYERS -> estimateTokens(storage.loadMemorySnapshot(memoryShortTermSize).toContextMessages())
         }
+        return base + profileTokens
     }
 
     // --- Memory Layers: явное сохранение в рабочую и долговременную память ---
